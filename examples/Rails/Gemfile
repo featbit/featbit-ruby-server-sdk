@@ -1,0 +1,8 @@
+# frozen_string_literal: true
+
+source "https://rubygems.org"
+
+gem "featbit-server-sdk", path: "../.."
+gem "puma", "~> 6.0"
+gem "rails", "~> 7.2"
+gem "tzinfo-data", platforms: %i[windows jruby]

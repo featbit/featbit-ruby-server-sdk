@@ -1,0 +1,50 @@
+AllCops:
+  TargetRubyVersion: 3.1
+  NewCops: enable
+  SuggestExtensions: false
+  Exclude:
+    - "vendor/**/*"
+
+Layout/EndOfLine:
+  Enabled: false
+
+Layout/LineLength:
+  Max: 140
+
+Style/StringLiterals:
+  EnforcedStyle: double_quotes
+
+Style/Documentation:
+  Enabled: false
+
+Metrics/AbcSize:
+  Max: 100
+
+Metrics/ClassLength:
+  Max: 250
+
+Metrics/BlockLength:
+  Exclude:
+    - "spec/**/*"
+
+Metrics/CyclomaticComplexity:
+  Max: 50
+
+Metrics/MethodLength:
+  Max: 35
+
+Metrics/PerceivedComplexity:
+  Max: 50
+
+Metrics/ParameterLists:
+  Max: 20
+
+Style/OptionalBooleanParameter:
+  Enabled: false
+
+Naming/PredicateMethod:
+  AllowedMethods:
+    - close
+    - enqueue
+    - flush
+    - post_batch
