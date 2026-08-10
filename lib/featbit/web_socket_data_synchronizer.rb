@@ -197,16 +197,15 @@ module FeatBit
       items = Array(fetch(data, "featureFlags", [])).map { |flag| [:flags, flag] }
       items.concat(Array(fetch(data, "segments", [])).map { |segment| [:segments, segment] })
       changed_keys = []
-      results = items.sort_by { |_kind, item| item_version(item) }.map do |kind, item|
+      items.sort_by { |_kind, item| item_version(item) }.each do |kind, item|
         applied = @data_store.upsert(kind, item, version: item_version(item))
         if applied && kind == :flags
           changed_keys << fetch(item, "key").to_s
         elsif applied
           changed_keys.concat(flags_referencing_segment(fetch(item, "id").to_s))
         end
-        applied
       end
-      [results.any?, changed_keys.uniq]
+      [true, changed_keys.uniq]
     end
 
     def valid_data?(data, event_type)

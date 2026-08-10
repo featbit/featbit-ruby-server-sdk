@@ -70,6 +70,23 @@ RSpec.describe FeatBit::WebSocketDataSynchronizer do
     expect(changes).to eq(["fresh"])
   end
 
+  it "accepts an all-stale patch without closing the socket" do
+    expect(store.init(test_bootstrap(test_flag), version: 10)).to be(true)
+    stale_flag = test_flag
+    stale_flag["timestamp"] = 9
+    message = {
+      "messageType" => "data-sync",
+      "data" => { "eventType" => "patch", "featureFlags" => [stale_flag], "segments" => [] }
+    }
+    socket = instance_double("Socket", close: true)
+    synchronizer = described_class.new(options: options, data_store: store, status_provider: status)
+
+    synchronizer.send(:handle_socket_message, socket, JSON.generate(message))
+
+    expect(socket).not_to have_received(:close)
+    expect(store.version).to eq(10)
+  end
+
   it "closes a socket when setup fails before reconnecting" do
     closed = Queue.new
     fake_socket = Class.new do
