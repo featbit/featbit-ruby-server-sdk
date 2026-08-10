@@ -36,7 +36,7 @@ module FeatBit
     end
 
     def initialized?
-      @status_provider.ready?
+      @data_store.initialized?
     rescue StandardError
       false
     end
@@ -125,12 +125,14 @@ module FeatBit
     def close
       @lifecycle_mutex.synchronize do
         return @close_result unless @close_result.nil?
+        return true if @closed
 
         @closed = true
-        results = [safe_close(@synchronizer), safe_close(@event_processor)]
-        results << safe_status_update(Status::CLOSED)
-        @close_result = results.all?
       end
+
+      results = [safe_close(@synchronizer), safe_close(@event_processor)]
+      results << safe_status_update(Status::CLOSED)
+      @lifecycle_mutex.synchronize { @close_result = results.all? }
     rescue StandardError => e
       safe_log(:warn, "FeatBit client close failed: #{e.message}")
       false
@@ -152,7 +154,7 @@ module FeatBit
     end
 
     def build_event_processor
-      return NullEventProcessor.new if @options.offline || @options.disable_events
+      return NullEventProcessor.new if @options.offline || @options.disable_events || !@options.valid?
       return @options.event_processor_factory.call(@options) if @options.event_processor_factory
 
       EventProcessor.new(@options)

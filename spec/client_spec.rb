@@ -109,6 +109,39 @@ RSpec.describe FeatBit::Client do
     expect(client.close).to be(true)
   end
 
+  it "does not start event delivery for invalid online options" do
+    client = described_class.new(FeatBit::Options.new)
+
+    expect(client.event_processor).to be_a(FeatBit::NullEventProcessor)
+    expect(client.status_provider.status).to eq(FeatBit::Status::FAILED)
+    expect(client.close).to be(true)
+  end
+
+  it "remains initialized while evaluating cached data after interruption" do
+    client = described_class.new(FeatBit::Options.new(offline: true, bootstrap: test_bootstrap(test_flag)))
+    client.status_provider.update(FeatBit::Status::INTERRUPTED)
+
+    expect(client).to be_initialized
+    expect(client.string_variation("welcome", { key: "u1" }, "fallback")).to eq("hello")
+    expect(client.close).to be(true)
+  end
+
+  it "allows component shutdown to re-enter close without locking" do
+    client = nil
+    synchronizer = instance_double("Synchronizer", start: true, close: true)
+    processor = Object.new
+    processor.define_singleton_method(:close) { client.close }
+    options = FeatBit::Options.new(
+      env_secret: "secret",
+      start_wait: 0.001,
+      synchronizer_factory: ->(*) { synchronizer },
+      event_processor_factory: ->(*) { processor }
+    )
+    client = described_class.new(options)
+
+    expect(client.close).to be(true)
+  end
+
   it "attempts to close every component once and never raises" do
     synchronizer = instance_double("Synchronizer", start: true)
     processor = instance_double("EventProcessor")

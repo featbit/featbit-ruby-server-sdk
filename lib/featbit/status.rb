@@ -80,11 +80,11 @@ module FeatBit
       listeners.each do |listener|
         listener.call(new_status, message)
       rescue StandardError => e
-        @logger&.warn("FeatBit status listener failed: #{e.message}")
+        safe_log(:warn, "FeatBit status listener failed: #{e.message}")
       end
       true
     rescue StandardError => e
-      @logger&.warn("FeatBit status update failed: #{e.message}")
+      safe_log(:warn, "FeatBit status update failed: #{e.message}")
       false
     end
 
@@ -92,6 +92,12 @@ module FeatBit
 
     def monotonic_time
       Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    end
+
+    def safe_log(level, message)
+      @logger&.public_send(level, message)
+    rescue StandardError
+      nil
     end
   end
 end

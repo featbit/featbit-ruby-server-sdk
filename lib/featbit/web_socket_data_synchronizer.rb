@@ -64,13 +64,14 @@ module FeatBit
       old_keys = @data_store.all_flags.keys
       if event_type == "full"
         changed = @data_store.init(data)
-        changed_keys = old_keys | @data_store.all_flags.keys
+        changed_keys = changed ? old_keys | @data_store.all_flags.keys : []
       else
         changed, changed_keys = process_patch(data)
       end
-      return false unless changed
 
       changed_keys.each { |key| safely_notify(key) }
+      return false unless changed
+
       @status_provider.update(Status::READY)
       true
     rescue JSON::ParserError => e
@@ -131,7 +132,7 @@ module FeatBit
       close_handler = method(:handle_socket_close)
 
       socket.on(:open) { open_handler.call(socket) }
-      socket.on(:message) { |event| message_handler.call(event) }
+      socket.on(:message) { |event| message_handler.call(socket, event) }
       socket.on(:error) { |event| error_handler.call(socket, event) }
       socket.on(:close) { |event| close_handler.call(event) }
     end
@@ -142,8 +143,10 @@ module FeatBit
       fail_status(e)
     end
 
-    def handle_socket_message(event)
-      process_message(event.respond_to?(:data) ? event.data : event.to_s)
+    def handle_socket_message(socket, event)
+      return if process_message(event.respond_to?(:data) ? event.data : event.to_s)
+
+      safe_close_socket(socket) unless @closed
     end
 
     def handle_socket_error(socket, event)
@@ -258,8 +261,6 @@ module FeatBit
       start = [SecureRandom.random_number([text.length, 1].max), 2].max
       start = text.length if start > text.length
       "#{encode_number(start, 3)}#{encode_number(timestamp_code.length, 2)}#{text[0, start]}#{timestamp_code}#{text[start..]}"
-    rescue StandardError
-      secret.to_s
     end
 
     def encode_number(number, length)

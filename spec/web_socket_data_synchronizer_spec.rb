@@ -47,6 +47,38 @@ RSpec.describe FeatBit::WebSocketDataSynchronizer do
     expect(changes).to eq(["welcome"])
   end
 
+  it "ignores stale patch items without hiding fresh changes" do
+    expect(store.init(test_bootstrap(test_flag), version: 10)).to be(true)
+    changes = []
+    synchronizer = described_class.new(
+      options: options,
+      data_store: store,
+      status_provider: status,
+      on_flags_changed: ->(key) { changes << key }
+    )
+    stale_flag = test_flag
+    stale_flag["timestamp"] = 9
+    fresh_flag = test_flag(key: "fresh")
+    fresh_flag["timestamp"] = 11
+    message = {
+      "messageType" => "data-sync",
+      "data" => { "eventType" => "patch", "featureFlags" => [stale_flag, fresh_flag], "segments" => [] }
+    }
+
+    expect(synchronizer.process_message(message)).to be(false)
+    expect(store.flag("fresh")).not_to be_nil
+    expect(changes).to eq(["fresh"])
+  end
+
+  it "closes the socket when a synchronization message is rejected" do
+    socket = instance_double("Socket", close: true)
+    synchronizer = described_class.new(options: options, data_store: store, status_provider: status)
+
+    synchronizer.send(:handle_socket_message, socket, "not-json")
+
+    expect(socket).to have_received(:close)
+  end
+
   it "connects with FeatBit authentication and requests the local version" do
     fake_socket = Class.new do
       attr_reader :handlers, :sent
@@ -170,5 +202,12 @@ RSpec.describe FeatBit::WebSocketDataSynchronizer do
     expect(token).not_to eq(secret)
     expect(reconstructed_secret).to eq(secret.delete_suffix("="))
     expect((Time.now.to_f * 1000).round - timestamp).to be_between(0, 2_000)
+  end
+
+  it "does not expose the raw environment secret when token encoding fails" do
+    synchronizer = described_class.new(options: options, data_store: store, status_provider: status)
+    allow(SecureRandom).to receive(:random_number).and_raise("random source failed")
+
+    expect { synchronizer.send(:build_token, "server-secret") }.to raise_error("random source failed")
   end
 end
