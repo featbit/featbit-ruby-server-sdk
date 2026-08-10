@@ -213,10 +213,12 @@ module FeatBit
     end
 
     def valid_data?(data, event_type)
+      flags = fetch(data, "featureFlags")
+      segments = fetch(data, "segments")
       data.is_a?(Hash) &&
         %w[full patch].include?(event_type) &&
-        fetch(data, "featureFlags").is_a?(Array) &&
-        fetch(data, "segments").is_a?(Array)
+        flags.is_a?(Array) && flags.all? { |flag| !fetch(flag, "key").to_s.empty? } &&
+        segments.is_a?(Array) && segments.all? { |segment| !fetch(segment, "id").to_s.empty? }
     end
 
     def flags_referencing_segment(segment_id)

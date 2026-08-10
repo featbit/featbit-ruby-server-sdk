@@ -87,6 +87,24 @@ RSpec.describe FeatBit::WebSocketDataSynchronizer do
     expect(store.version).to eq(10)
   end
 
+  it "rejects an entire malformed patch before applying valid siblings" do
+    fresh_flag = test_flag(key: "fresh")
+    fresh_flag["timestamp"] = 11
+    malformed_flag = test_flag
+    malformed_flag.delete("key")
+    message = {
+      "messageType" => "data-sync",
+      "data" => { "eventType" => "patch", "featureFlags" => [malformed_flag, fresh_flag], "segments" => [] }
+    }
+    socket = instance_double("Socket", close: true)
+    synchronizer = described_class.new(options: options, data_store: store, status_provider: status)
+
+    synchronizer.send(:handle_socket_message, socket, JSON.generate(message))
+
+    expect(socket).to have_received(:close)
+    expect(store.flag("fresh")).to be_nil
+  end
+
   it "closes a socket when setup fails before reconnecting" do
     closed = Queue.new
     fake_socket = Class.new do
