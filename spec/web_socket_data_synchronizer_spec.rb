@@ -175,6 +175,42 @@ RSpec.describe FeatBit::WebSocketDataSynchronizer do
     expect(synchronizer.close).to be(true)
   end
 
+  it "registers handlers before a connector can emit open" do
+    socket = Class.new do
+      attr_reader :handlers, :sent
+
+      def initialize
+        @handlers = {}
+        @sent = []
+        @closed = false
+      end
+
+      def on(event, &block) = @handlers[event] = block
+      def send(message) = @sent << message
+      def closed? = @closed
+      def close = @closed = true
+    end.new
+    connected = Queue.new
+    connector = lambda do |_url, _headers, &configure|
+      configure.call(socket)
+      socket.handlers.fetch(:open).call
+      connected << true
+      socket
+    end
+    synchronizer = described_class.new(
+      options: options,
+      data_store: store,
+      status_provider: status,
+      connector: connector
+    )
+
+    synchronizer.start
+
+    Timeout.timeout(2) { connected.pop }
+    expect(JSON.parse(socket.sent.fetch(0))).to eq("messageType" => "data-sync", "data" => { "timestamp" => 0 })
+    expect(synchronizer.close).to be(true)
+  end
+
   it "interrupts reconnect backoff promptly when closed" do
     attempted = Queue.new
     connector = lambda do |_url, _headers|

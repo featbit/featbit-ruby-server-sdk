@@ -49,10 +49,12 @@ module FeatBit
     end
 
     def flush
-      return false if closed?
-
       ack = Queue.new
-      @control_queue << { type: FLUSH, ack: ack }
+      @state_mutex.synchronize do
+        return false if @closed
+
+        @control_queue << { type: FLUSH, ack: ack }
+      end
 
       Timeout.timeout(CONTROL_TIMEOUT) { ack.pop } != false
     rescue StandardError => e
@@ -64,11 +66,14 @@ module FeatBit
       @close_mutex.synchronize do
         return @close_result unless @close_result.nil?
 
-        mark_closed
-        return @close_result = true unless @thread&.alive?
-
         ack = Queue.new
-        @control_queue << { type: STOP, ack: ack }
+        worker_alive = @thread&.alive?
+        @state_mutex.synchronize do
+          @closed = true
+          @control_queue << { type: STOP, ack: ack } if worker_alive
+        end
+        return @close_result = true unless worker_alive
+
         delivered = Timeout.timeout(CONTROL_TIMEOUT) { ack.pop } != false
         @thread&.join(CONTROL_TIMEOUT)
         @close_result = delivered && !@thread&.alive?
@@ -199,12 +204,6 @@ module FeatBit
         raise DeliveryRejected, ["HTTP #{response.code}", message].reject(&:empty?).join(": ")
       end
 
-      true
-    end
-
-    def closed?
-      @state_mutex.synchronize { @closed }
-    rescue StandardError
       true
     end
 

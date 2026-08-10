@@ -89,11 +89,15 @@ module FeatBit
       until @closed
         socket = nil
         begin
-          socket = @connector.call(websocket_url, headers)
+          configured = false
+          socket = @connector.call(websocket_url, headers) do |connected_socket|
+            configure_socket(connected_socket)
+            configured = true
+          end
           @socket_mutex.synchronize { @socket = socket }
           break if @closed
 
-          configure_socket(socket)
+          configure_socket(socket) unless configured
           delay = @options.reconnect_delay
           next_ping = monotonic_time + PING_INTERVAL
           until @closed || socket_closed?(socket)
@@ -120,9 +124,9 @@ module FeatBit
       end
     end
 
-    def connect(url, request_headers)
+    def connect(url, request_headers, &configure)
       Timeout.timeout(@options.connect_timeout) do
-        WebSocket::Client::Simple.connect(url, headers: request_headers)
+        WebSocket::Client::Simple.connect(url, headers: request_headers, &configure)
       end
     end
 

@@ -153,6 +153,33 @@ RSpec.describe FeatBit::EventProcessor do
     expect(results).to all(be(true))
   end
 
+  it "orders a concurrent flush before shutdown once flush is accepted" do
+    options = FeatBit::Options.new(env_secret: "secret", events_flush_interval: 60)
+    processor = described_class.new(options, sender: ->(_batch) { true })
+    original_queue = processor.instance_variable_get(:@control_queue)
+    flush_started = Queue.new
+    release_flush = Queue.new
+    controlled_queue = Object.new
+    controlled_queue.define_singleton_method(:<<) do |message|
+      if message[:type] == FeatBit::EventProcessor::FLUSH
+        flush_started << true
+        release_flush.pop
+      end
+      original_queue << message
+    end
+    controlled_queue.define_singleton_method(:pop) { |*args| original_queue.pop(*args) }
+    processor.instance_variable_set(:@control_queue, controlled_queue)
+    processor.enqueue(id: 1)
+
+    flush_thread = Thread.new { processor.flush }
+    Timeout.timeout(2) { flush_started.pop }
+    close_thread = Thread.new { processor.close }
+    release_flush << true
+
+    expect(Timeout.timeout(2) { flush_thread.value }).to be(true)
+    expect(Timeout.timeout(2) { close_thread.value }).to be(true)
+  end
+
   it "does not retain worker threads across repeated lifecycles" do
     existing_ids = Thread.list.filter_map { |thread| thread.object_id if thread.name == "featbit-event-processor" }
     options = FeatBit::Options.new(env_secret: "secret")
