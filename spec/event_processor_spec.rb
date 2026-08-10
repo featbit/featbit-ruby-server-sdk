@@ -79,6 +79,33 @@ RSpec.describe FeatBit::EventProcessor do
     expect(processor.close).to be(true)
   end
 
+  it "attempts later slices when an earlier slice is rejected" do
+    delivered_ids = []
+    options = FeatBit::Options.new(env_secret: "secret", events_flush_interval: 60, events_batch_size: 1)
+    processor = described_class.new(options, sender: lambda { |batch|
+      id = batch.fetch(0).fetch(:id)
+      delivered_ids << id
+      raise FeatBit::EventProcessor::DeliveryRejected if id == 1
+
+      true
+    })
+    processor.enqueue(id: 1)
+    processor.enqueue(id: 2)
+
+    expect(processor.flush).to be(false)
+    expect(delivered_ids).to eq([1, 2])
+    expect(processor.close).to be(true)
+  end
+
+  it "closes immediately when its worker could not start" do
+    allow(Thread).to receive(:new).and_raise("thread unavailable")
+    processor = described_class.new(FeatBit::Options.new(env_secret: "secret"))
+    started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+
+    expect(processor.close).to be(true)
+    expect(Process.clock_gettime(Process::CLOCK_MONOTONIC) - started).to be < 0.1
+  end
+
   it "partitions events drained by flush to the configured server batch size" do
     batches = []
     options = FeatBit::Options.new(env_secret: "secret", events_flush_interval: 60, events_batch_size: 2)

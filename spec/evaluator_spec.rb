@@ -77,4 +77,34 @@ RSpec.describe FeatBit::Evaluator do
     expect(detail.value).to eq("hello")
     expect(detail.reason).to eq(FeatBit::Evaluator::REASONS[:fallthrough])
   end
+
+  it "uses stable percentage buckets for partial rollouts" do
+    fallthrough = {
+      "dispatchKey" => "keyId",
+      "variations" => [
+        { "id" => "on", "rollout" => [0, 0.5] },
+        { "id" => "off", "rollout" => [0.5, 1] }
+      ]
+    }
+    store.init(test_bootstrap(test_flag(fallthrough: fallthrough)))
+
+    expect(evaluator.evaluate("welcome", FeatBit::User.new("u2"), nil).variation_id).to eq("on")
+    expect(evaluator.evaluate("welcome", FeatBit::User.new("u1"), nil).variation_id).to eq("off")
+  end
+
+  it "bounds regular expression matching" do
+    skip "per-regexp timeout is unavailable on this Ruby" unless described_class::REGEXP_TIMEOUT_SUPPORTED
+
+    condition = { "property" => "value", "op" => "MatchRegex", "value" => "(a+)+$" }
+    rule = { "conditions" => [condition], "variations" => [{ "id" => "off", "rollout" => [0, 1] }] }
+    store.init(test_bootstrap(test_flag(rules: [rule])))
+    user = FeatBit::User.new("u1", custom: { value: "#{'a' * 50_000}!" })
+
+    started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    detail = evaluator.evaluate("welcome", user, nil)
+
+    expect(detail.variation_id).to eq("on")
+    expect(detail.reason).to eq(FeatBit::Evaluator::REASONS[:fallthrough])
+    expect(Process.clock_gettime(Process::CLOCK_MONOTONIC) - started).to be < 1
+  end
 end

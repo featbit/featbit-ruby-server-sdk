@@ -6,6 +6,14 @@ require "set"
 
 module FeatBit
   class Evaluator
+    REGEXP_TIMEOUT = 0.05
+    REGEXP_TIMEOUT_SUPPORTED = begin
+      Regexp.new("", timeout: REGEXP_TIMEOUT)
+      true
+    rescue ArgumentError, TypeError
+      false
+    end
+
     REASONS = {
       client_not_ready: "client not ready",
       flag_not_found: "flag not found",
@@ -135,14 +143,25 @@ module FeatBit
       when "EndsWith" then !actual.nil? && actual.to_s.end_with?(expected.to_s)
       when "IsTrue" then actual == true || actual.to_s.casecmp("true").zero?
       when "IsFalse" then actual == false || actual.to_s.casecmp("false").zero?
-      when "MatchRegex" then !actual.nil? && Regexp.new(expected.to_s).match?(actual.to_s)
-      when "NotMatchRegex" then actual.nil? || !Regexp.new(expected.to_s).match?(actual.to_s)
+      when "MatchRegex" then !actual.nil? && regex_match(expected, actual) == true
+      when "NotMatchRegex" then actual.nil? || regex_match(expected, actual) == false
       when "User is in segment" then segment_match?(user, expected, visited_segments)
       when "User is not in segment" then !segment_match?(user, expected, visited_segments)
       else false
       end
     rescue StandardError
       false
+    end
+
+    def regex_match(pattern, value)
+      regexp = if REGEXP_TIMEOUT_SUPPORTED
+                 Regexp.new(pattern.to_s, timeout: REGEXP_TIMEOUT)
+               else
+                 Regexp.new(pattern.to_s)
+               end
+      regexp.match?(value.to_s)
+    rescue StandardError
+      nil
     end
 
     def segment_match?(user, serialized_ids, visited_segments)

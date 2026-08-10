@@ -110,6 +110,7 @@ module FeatBit
           delay = [delay * 2, 30.0].min
         rescue StandardError => e
           fail_status(e, interrupted: true)
+          safe_close_socket(socket)
           interruptible_sleep(delay) unless @closed
           delay = [delay * 2, 30.0].min
         ensure
@@ -205,7 +206,7 @@ module FeatBit
         end
         applied
       end
-      [results.all?, changed_keys.uniq]
+      [results.any?, changed_keys.uniq]
     end
 
     def valid_data?(data, event_type)

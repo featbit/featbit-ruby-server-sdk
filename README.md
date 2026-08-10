@@ -69,8 +69,8 @@ client.close
 
 ### Examples
 
-- [Console](/examples/Console)
-- [Rails](/examples/Rails)
+- [Console](./examples/Console)
+- [Rails](./examples/Rails)
 
 ## SDK
 
@@ -253,7 +253,7 @@ gem build featbit-server-sdk.gemspec
 
 The test suite covers evaluation precedence, typed values, segments and cyclic segment protection, protocol payloads, full/patch synchronization, equal-timestamp updates, concurrent data access, bounded event queues, concurrent/idempotent shutdown, thread cleanup, listener mutation, and exception isolation.
 
-See [docs/REVIEW.md](/docs/REVIEW.md) for the code-review findings, fixes, and verification matrix.
+See [docs/REVIEW.md](./docs/REVIEW.md) for the code-review findings, fixes, and verification matrix.
 
 For an opt-in live check against FeatBit Cloud:
 

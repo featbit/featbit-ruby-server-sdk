@@ -65,9 +65,37 @@ RSpec.describe FeatBit::WebSocketDataSynchronizer do
       "data" => { "eventType" => "patch", "featureFlags" => [stale_flag, fresh_flag], "segments" => [] }
     }
 
-    expect(synchronizer.process_message(message)).to be(false)
+    expect(synchronizer.process_message(message)).to be(true)
     expect(store.flag("fresh")).not_to be_nil
     expect(changes).to eq(["fresh"])
+  end
+
+  it "closes a socket when setup fails before reconnecting" do
+    closed = Queue.new
+    fake_socket = Class.new do
+      def initialize(closed)
+        @closed = closed
+      end
+
+      def on(*) = raise("handler setup failed")
+
+      def close
+        @closed << true
+        true
+      end
+    end.new(closed)
+    slow_options = FeatBit::Options.new(env_secret: "secret", reconnect_delay: 10)
+    synchronizer = described_class.new(
+      options: slow_options,
+      data_store: store,
+      status_provider: status,
+      connector: ->(*) { fake_socket }
+    )
+
+    synchronizer.start
+
+    expect(Timeout.timeout(2) { closed.pop }).to be(true)
+    expect(synchronizer.close).to be(true)
   end
 
   it "closes the socket when a synchronization message is rejected" do

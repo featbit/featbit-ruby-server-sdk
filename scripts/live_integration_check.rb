@@ -26,6 +26,7 @@ user = FeatBit::User.new(
 )
 detail = client.variation_detail(flag_key, user, false)
 raise "live flag evaluation failed: #{detail.error_message}" unless detail.success?
+raise "live flag is not boolean: #{detail.value.class}" unless [true, false].include?(detail.value)
 
 errors = Queue.new
 thread_count = Integer(ENV.fetch("FEATBIT_LIVE_THREADS", "8"), 10)

@@ -5,8 +5,8 @@ module FeatBit
     attr_reader :key, :name, :custom
 
     def initialize(key, name: nil, custom: {})
-      @key = key.to_s
-      @name = name
+      @key = deep_freeze(deep_copy(key.to_s))
+      @name = deep_freeze(deep_copy(name)) unless name.nil?
       @custom = deep_freeze(deep_copy(custom || {}).transform_keys(&:to_s))
       freeze
     rescue StandardError

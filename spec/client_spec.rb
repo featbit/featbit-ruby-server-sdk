@@ -50,10 +50,18 @@ RSpec.describe FeatBit::Client do
   end
 
   it "defensively copies and freezes nested user attributes" do
+    key = +"u1"
+    name = +"Ada"
     attributes = { profile: { tags: ["beta"] } }
-    user = FeatBit::User.new("u1", custom: attributes)
+    user = FeatBit::User.new(key, name: name, custom: attributes)
+    key.replace("changed")
+    name.replace("changed")
     attributes[:profile][:tags] << "mutated"
 
+    expect(user.key).to eq("u1")
+    expect(user.name).to eq("Ada")
+    expect(user.key).to be_frozen
+    expect(user.name).to be_frozen
     expect(user["profile"]).to eq("tags" => ["beta"])
     expect(user["profile"]).to be_frozen
     expect(user["profile"]["tags"]).to be_frozen

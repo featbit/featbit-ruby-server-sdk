@@ -65,6 +65,8 @@ module FeatBit
         return @close_result unless @close_result.nil?
 
         mark_closed
+        return @close_result = true unless @thread&.alive?
+
         ack = Queue.new
         @control_queue << { type: STOP, ack: ack }
         delivered = Timeout.timeout(CONTROL_TIMEOUT) { ack.pop } != false
@@ -151,7 +153,11 @@ module FeatBit
     def send_batch(batch)
       return true if batch.empty?
 
-      batch.each_slice(@options.events_batch_size).all? { |slice| send_slice(slice) }
+      delivered = true
+      batch.each_slice(@options.events_batch_size) do |slice|
+        delivered = false unless send_slice(slice)
+      end
+      delivered
     end
 
     def send_slice(batch)
