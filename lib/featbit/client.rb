@@ -76,7 +76,7 @@ module FeatBit
       typed_variation(flag_key, user, default_value, [Hash, Array])
     end
 
-    def track(user, event_name, numeric_value = 1.0, properties: {})
+    def track(user, event_name, numeric_value = 1.0)
       normalized_user = normalize_user(user)
       return false unless normalized_user.valid? && !event_name.to_s.empty?
 
@@ -87,9 +87,8 @@ module FeatBit
           numericValue: numeric_value.to_f,
           route: "index/metric",
           type: "CustomEvent",
-          appType: "rubyserverside",
-          timestamp: timestamp_ms,
-          properties: properties || {}
+          appType: "ruby-server-side",
+          timestamp: timestamp_ms
         }]
       )
     rescue StandardError => e

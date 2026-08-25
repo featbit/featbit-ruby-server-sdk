@@ -49,6 +49,37 @@ RSpec.describe FeatBit::Client do
     expect(client.close).to be(true)
   end
 
+  it "tracks custom events using the supported metric fields" do
+    events = []
+    processor = Object.new
+    processor.define_singleton_method(:enqueue) do |event|
+      events << event
+      true
+    end
+    processor.define_singleton_method(:close) { true }
+    synchronizer = instance_double("Synchronizer", start: true, close: true)
+    options = FeatBit::Options.new(
+      env_secret: "secret",
+      start_wait: 0.001,
+      synchronizer_factory: ->(*) { synchronizer },
+      event_processor_factory: ->(*) { processor }
+    )
+    client = described_class.new(options)
+
+    expect(client.track({ key: "u1" }, "checkout_completed", 99)).to be(true)
+    expect(events.fetch(0)).to include(user: include("keyId" => "u1"))
+    expect(events.dig(0, :metrics, 0)).to include(
+      eventName: "checkout_completed",
+      numericValue: 99.0,
+      route: "index/metric",
+      type: "CustomEvent",
+      appType: "ruby-server-side",
+      timestamp: be_a(Integer)
+    )
+    expect(events.dig(0, :metrics, 0)).not_to have_key(:properties)
+    expect(client.close).to be(true)
+  end
+
   it "defensively copies and freezes nested user attributes" do
     key = +"u1"
     name = +"Ada"

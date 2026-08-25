@@ -217,7 +217,7 @@ Successful flag evaluations automatically enqueue variation events. Custom metri
 
 ```ruby
 client.bool_variation("new-checkout", user, false)
-client.track(user, "checkout_completed", 99.0, properties: { currency: "CNY" })
+client.track(user, "checkout_completed", 99.0)
 client.flush
 ```
 
