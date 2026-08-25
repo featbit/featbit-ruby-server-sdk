@@ -1,0 +1,10 @@
+/.bundle/
+/coverage/
+/pkg/
+/vendor/bundle/
+/*.gem
+/Gemfile.lock
+/examples/*/.bundle/
+/examples/*/Gemfile.lock
+/examples/Rails/log/
+/examples/Rails/tmp/
