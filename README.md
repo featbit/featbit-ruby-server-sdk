@@ -241,28 +241,6 @@ Call `track` after evaluating the related experiment flag. `numeric_value` defau
 
 Use the separate [FeatBit OpenFeature Ruby provider](https://github.com/featbit/openfeature-provider-ruby-server) to access this SDK through the standard OpenFeature API.
 
-## Development and review checks
-
-```sh
-bundle install
-bundle exec rspec
-bundle exec rubocop
-bundle exec ruby scripts/resource_audit.rb
-gem build featbit-server-sdk.gemspec
-```
-
-The test suite covers evaluation precedence, typed values, segments and cyclic segment protection, protocol payloads, full/patch synchronization, equal-timestamp updates, concurrent data access, bounded event queues, concurrent/idempotent shutdown, thread cleanup, listener mutation, and exception isolation.
-
-See [docs/REVIEW.md](./docs/REVIEW.md) for the code-review findings, fixes, and verification matrix.
-
-For an opt-in live check against FeatBit Cloud:
-
-```sh
-FEATBIT_ENV_SECRET="..." \
-FEATBIT_FLAG_KEY="game-runner" \
-bundle exec ruby scripts/live_integration_check.rb
-```
-
 ## Getting support
 
 - Ask questions in [FeatBit Slack](https://join.slack.com/t/featbit/shared_invite/zt-1ew5e2vbb-x6Apan1xZOaYMnFzqZkGNQ).
