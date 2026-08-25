@@ -10,7 +10,7 @@ The SDK is designed for multi-user server applications such as Rails services, b
 
 The SDK maintains a WebSocket connection to the FeatBit evaluation service. Feature flags and segments are synchronized into a thread-safe in-memory store, so flag evaluation is local and does not make a network request.
 
-Changes are pushed to the SDK as full snapshots or incremental patches. Interrupted connections are retried automatically with capped exponential backoff, and the SDK sends periodic heartbeat messages. Use [offline mode](#offline-mode) when the application must provide its own bootstrap data.
+Changes are pushed to the SDK as full snapshots or incremental patches. Interrupted connections are retried automatically with capped exponential backoff, and the SDK sends periodic heartbeat messages. 
 
 ## Get Started
 
