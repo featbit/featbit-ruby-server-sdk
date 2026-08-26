@@ -3,16 +3,12 @@
 require "digest/md5"
 require "json"
 require "set"
+require "timeout"
 
 module FeatBit
   class Evaluator
     REGEXP_TIMEOUT = 0.05
-    REGEXP_TIMEOUT_SUPPORTED = begin
-      Regexp.new("", timeout: REGEXP_TIMEOUT)
-      true
-    rescue ArgumentError, TypeError
-      false
-    end
+    NATIVE_REGEXP_TIMEOUT_SUPPORTED = Regexp.respond_to?(:timeout)
 
     REASONS = {
       client_not_ready: "client not ready",
@@ -154,12 +150,11 @@ module FeatBit
     end
 
     def regex_match(pattern, value)
-      regexp = if REGEXP_TIMEOUT_SUPPORTED
-                 Regexp.new(pattern.to_s, timeout: REGEXP_TIMEOUT)
-               else
-                 Regexp.new(pattern.to_s)
-               end
-      regexp.match?(value.to_s)
+      if NATIVE_REGEXP_TIMEOUT_SUPPORTED
+        Regexp.new(pattern.to_s, timeout: REGEXP_TIMEOUT).match?(value.to_s)
+      else
+        Timeout.timeout(REGEXP_TIMEOUT) { Regexp.new(pattern.to_s).match?(value.to_s) }
+      end
     rescue StandardError
       nil
     end

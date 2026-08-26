@@ -93,8 +93,6 @@ RSpec.describe FeatBit::Evaluator do
   end
 
   it "bounds regular expression matching" do
-    skip "per-regexp timeout is unavailable on this Ruby" unless described_class::REGEXP_TIMEOUT_SUPPORTED
-
     condition = { "property" => "value", "op" => "MatchRegex", "value" => "(a+)+$" }
     rule = { "conditions" => [condition], "variations" => [{ "id" => "off", "rollout" => [0, 1] }] }
     store.init(test_bootstrap(test_flag(rules: [rule])))
