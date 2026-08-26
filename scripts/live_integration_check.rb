@@ -56,7 +56,7 @@ raise "client did not close cleanly" unless close_result
 Timeout.timeout(5) do
   loop do
     residual = Thread.list.reject { |thread| baseline_thread_ids.include?(thread.object_id) }
-                          .select { |thread| thread.name&.start_with?("featbit-") && thread.alive? }
+                     .select { |thread| thread.name&.start_with?("featbit-") && thread.alive? }
     break if residual.empty?
 
     sleep(0.05)
