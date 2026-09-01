@@ -361,6 +361,94 @@ RSpec.describe FeatBit::WebSocketDataSynchronizer do
     expect(synchronizer.close).to be(true)
   end
 
+  it "stops reconnecting when the server rejects the connection with close code 4003" do
+    raw_frame = WebSocket::Frame::Outgoing::Server.new(
+      version: 13, type: :close, code: 4003, data: "invalid environment secret"
+    ).to_s
+    close_frame = WebSocket::Frame::Incoming::Client.new(version: 13, data: raw_frame).next
+    attempts = 0
+    socket = Class.new do
+      attr_reader :handlers
+
+      def initialize
+        @handlers = {}
+        @closed = false
+      end
+
+      def on(event, &block) = @handlers[event] = block
+      def send(*) = nil
+      def closed? = @closed
+      def close = @closed = true
+    end.new
+    connector = lambda do |_url, _headers, &configure|
+      attempts += 1
+      configure.call(socket)
+      socket
+    end
+    rejection_options = FeatBit::Options.new(env_secret: "secret", reconnect_delay: 0.01)
+    synchronizer = described_class.new(
+      options: rejection_options,
+      data_store: store,
+      status_provider: status,
+      connector: connector
+    )
+
+    synchronizer.start
+    Timeout.timeout(2) { sleep(0.01) until socket.handlers.key?(:message) }
+    socket.handlers.fetch(:open).call
+    socket.handlers.fetch(:message).call(close_frame)
+    Timeout.timeout(2) { sleep(0.01) while synchronizer.instance_variable_get(:@thread)&.alive? }
+
+    expect(attempts).to eq(1)
+    expect(socket).to be_closed
+    expect(status.status).to eq(FeatBit::Status::FAILED)
+    expect(status.message).to eq("WebSocket connection rejected by server (4003): invalid environment secret")
+    expect(synchronizer.close).to be(true)
+  end
+
+  it "reconnects after a non-rejected close frame" do
+    raw_frame = WebSocket::Frame::Outgoing::Server.new(
+      version: 13, type: :close, code: 1000, data: "service restart"
+    ).to_s
+    close_frame = WebSocket::Frame::Incoming::Client.new(version: 13, data: raw_frame).next
+    connected = Queue.new
+    connector = lambda do |_url, _headers, &configure|
+      socket = Class.new do
+        attr_reader :handlers
+
+        def initialize
+          @handlers = {}
+          @closed = false
+        end
+
+        def on(event, &block) = @handlers[event] = block
+        def send(*) = nil
+        def closed? = @closed
+        def close = @closed = true
+      end.new
+      configure.call(socket)
+      connected << socket
+      socket
+    end
+    reconnect_options = FeatBit::Options.new(env_secret: "secret", reconnect_delay: 0.01)
+    synchronizer = described_class.new(
+      options: reconnect_options,
+      data_store: store,
+      status_provider: status,
+      connector: connector
+    )
+
+    synchronizer.start
+    first_socket = Timeout.timeout(2) { connected.pop }
+    first_socket.handlers.fetch(:open).call
+    first_socket.handlers.fetch(:message).call(close_frame)
+    second_socket = Timeout.timeout(2) { connected.pop }
+
+    expect(first_socket).to be_closed
+    expect(second_socket).not_to be_closed
+    expect(synchronizer.close).to be(true)
+  end
+
   it "encodes a current timestamp into the connection token without falling back to the secret" do
     secret = "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG="
     synchronizer = described_class.new(options: options, data_store: store, status_provider: status)

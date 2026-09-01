@@ -7,6 +7,55 @@ require "timeout"
 require "websocket-client-simple"
 
 module FeatBit
+  class WebSocketClosePolicy
+    SERVER_REJECTED_CODE = 4003
+
+    def initialize(status_provider)
+      @status_provider = status_provider
+      @mutex = Mutex.new
+      @rejected = false
+    end
+
+    def close_frame?(event)
+      event.respond_to?(:type) && event.type.to_sym == :close
+    rescue StandardError
+      false
+    end
+
+    def reject?(event)
+      return false unless close_code(event) == SERVER_REJECTED_CODE
+
+      @mutex.synchronize { @rejected = true }
+      reason = close_reason(event)
+      message = "WebSocket connection rejected by server (4003)"
+      message = "#{message}: #{reason}" unless reason.empty?
+      @status_provider.update(Status::FAILED, message: message)
+      true
+    end
+
+    def rejected?
+      @mutex.synchronize { @rejected }
+    end
+
+    private
+
+    def close_code(event)
+      return event.code.to_i if event.respond_to?(:code) && event.code
+      return event[:code].to_i if event.is_a?(Hash) && event[:code]
+
+      event["code"].to_i if event.is_a?(Hash) && event["code"]
+    end
+
+    def close_reason(event)
+      value = if event.respond_to?(:reason) && event.reason
+                event.reason
+              elsif event.respond_to?(:data) && event.data
+                event.data
+              end
+      value.to_s
+    end
+  end
+
   class WebSocketConnectionAttempt
     attr_reader :socket
 
@@ -81,6 +130,7 @@ module FeatBit
       @options = options
       @data_store = data_store
       @status_provider = status_provider
+      @close_policy = WebSocketClosePolicy.new(status_provider)
       @on_flags_changed = on_flags_changed
       @connector = connector || method(:connect)
       @closed = false
@@ -151,7 +201,7 @@ module FeatBit
 
     def run
       delay = @options.reconnect_delay
-      until @closed
+      until @closed || @close_policy.rejected?
         socket = attempt = nil
         begin
           attempt = WebSocketConnectionAttempt.new(timeout: @options.connect_timeout, clock: method(:monotonic_time))
@@ -159,10 +209,10 @@ module FeatBit
             configure_socket(connected_socket, attempt)
           end
           @socket_mutex.synchronize { @socket = socket }
-          break if @closed
+          break if @closed || @close_policy.rejected?
 
           connection_result = attempt.wait(stopped: -> { @closed })
-          break if connection_result == :stopped
+          break if %i[stopped rejected].include?(connection_result)
 
           unless connection_result == :opened
             delay = retry_unopened_socket(socket, connection_result, delay)
@@ -171,12 +221,14 @@ module FeatBit
 
           delay = @options.reconnect_delay
           attempt.monitor(stopped: -> { @closed }, ping: method(:send_ping), interval: PING_INTERVAL)
-          break if @closed
+          break if @closed || @close_policy.rejected?
 
           @status_provider.update(Status::INTERRUPTED, message: "WebSocket disconnected")
           interruptible_sleep(delay)
           delay = [delay * 2, 30.0].min
         rescue StandardError => e
+          break if @close_policy.rejected?
+
           socket ||= attempt&.socket
           fail_status(e, interrupted: true)
           safe_close_socket(socket)
@@ -226,13 +278,19 @@ module FeatBit
     end
 
     def handle_socket_message(socket, event)
+      if @close_policy.close_frame?(event)
+        handle_socket_close(event)
+        safe_close_socket(socket)
+        return
+      end
+
       return if process_message(event.respond_to?(:data) ? event.data : event.to_s)
 
       safe_close_socket(socket) unless @closed
     end
 
     def handle_socket_error(socket, event, attempt = nil)
-      return if @closed
+      return if @closed || @close_policy.rejected?
 
       error = event.respond_to?(:message) ? event.message : event
       fail_status(error, interrupted: true)
@@ -240,9 +298,12 @@ module FeatBit
       safe_close_socket(socket)
     end
 
-    def handle_socket_close(_event, attempt = nil)
-      attempt&.signal(:closed)
-      @status_provider.update(Status::INTERRUPTED, message: "WebSocket closed") unless @closed
+    def handle_socket_close(event, attempt = nil)
+      rejected = @close_policy.reject?(event)
+      attempt&.signal(rejected ? :rejected : :closed)
+      return if @closed || rejected || @close_policy.rejected?
+
+      @status_provider.update(Status::INTERRUPTED, message: "WebSocket closed")
     end
 
     def safe_close_socket(socket)
