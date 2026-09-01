@@ -7,6 +7,71 @@ require "timeout"
 require "websocket-client-simple"
 
 module FeatBit
+  class WebSocketConnectionAttempt
+    attr_reader :socket
+
+    def initialize(timeout:, clock:)
+      @deadline = clock.call + timeout
+      @clock = clock
+      @mutex = Mutex.new
+      @condition = ConditionVariable.new
+      @result = nil
+    end
+
+    def connect(connector, url, headers)
+      configured = false
+      @socket = connector.call(url, headers) do |connected_socket|
+        yield connected_socket
+        configured = true
+      end
+      yield @socket unless configured
+      @socket
+    end
+
+    def signal(result)
+      @mutex.synchronize do
+        return if @result
+
+        @result = result
+        @condition.broadcast
+      end
+    end
+
+    def wait(stopped:)
+      @mutex.synchronize do
+        until @result || stopped.call
+          remaining = @deadline - @clock.call
+          return :timeout unless remaining.positive?
+
+          @condition.wait(@mutex, [remaining, 0.05].min)
+        end
+        stopped.call ? :stopped : @result
+      end
+    end
+
+    def monitor(stopped:, ping:, interval:)
+      next_ping = @clock.call + interval
+      until stopped.call || socket_closed?
+        if @clock.call >= next_ping
+          ping.call(@socket)
+          next_ping = @clock.call + interval
+        end
+        sleep(0.05)
+      end
+    end
+
+    private
+
+    def socket_closed?
+      return @socket.closed? if @socket.respond_to?(:closed?)
+      return !@socket.open? if @socket.respond_to?(:open?)
+
+      false
+    rescue StandardError
+      true
+    end
+  end
+
   class WebSocketDataSynchronizer
     ALPHABETS = { "0" => "Q", "1" => "B", "2" => "W", "3" => "S", "4" => "P",
                   "5" => "H", "6" => "D", "7" => "X", "8" => "Z", "9" => "U" }.freeze
@@ -87,32 +152,32 @@ module FeatBit
     def run
       delay = @options.reconnect_delay
       until @closed
-        socket = nil
+        socket = attempt = nil
         begin
-          configured = false
-          socket = @connector.call(websocket_url, headers) do |connected_socket|
-            configure_socket(connected_socket)
-            configured = true
+          attempt = WebSocketConnectionAttempt.new(timeout: @options.connect_timeout, clock: method(:monotonic_time))
+          socket = attempt.connect(@connector, websocket_url, headers) do |connected_socket|
+            configure_socket(connected_socket, attempt)
           end
           @socket_mutex.synchronize { @socket = socket }
           break if @closed
 
-          configure_socket(socket) unless configured
-          delay = @options.reconnect_delay
-          next_ping = monotonic_time + PING_INTERVAL
-          until @closed || socket_closed?(socket)
-            if monotonic_time >= next_ping
-              socket.send(JSON.generate(messageType: "ping", data: nil))
-              next_ping = monotonic_time + PING_INTERVAL
-            end
-            interruptible_sleep(0.05)
+          connection_result = attempt.wait(stopped: -> { @closed })
+          break if connection_result == :stopped
+
+          unless connection_result == :opened
+            delay = retry_unopened_socket(socket, connection_result, delay)
+            next
           end
+
+          delay = @options.reconnect_delay
+          attempt.monitor(stopped: -> { @closed }, ping: method(:send_ping), interval: PING_INTERVAL)
           break if @closed
 
           @status_provider.update(Status::INTERRUPTED, message: "WebSocket disconnected")
           interruptible_sleep(delay)
           delay = [delay * 2, 30.0].min
         rescue StandardError => e
+          socket ||= attempt&.socket
           fail_status(e, interrupted: true)
           safe_close_socket(socket)
           interruptible_sleep(delay) unless @closed
@@ -124,28 +189,40 @@ module FeatBit
       end
     end
 
+    def retry_unopened_socket(socket, result, delay)
+      fail_status(Timeout::Error.new("WebSocket handshake timed out"), interrupted: true) if result == :timeout
+      safe_close_socket(socket)
+      interruptible_sleep(delay) unless @closed
+      [delay * 2, 30.0].min
+    end
+
+    def send_ping(socket) = socket.send(JSON.generate(messageType: "ping", data: nil))
+
     def connect(url, request_headers, &configure)
       Timeout.timeout(@options.connect_timeout) do
         WebSocket::Client::Simple.connect(url, headers: request_headers, &configure)
       end
     end
 
-    def configure_socket(socket)
-      open_handler = method(:handle_socket_open)
+    def configure_socket(socket, attempt = nil)
+      open_handler = -> { handle_socket_open(socket, attempt) }
       message_handler = method(:handle_socket_message)
-      error_handler = method(:handle_socket_error)
-      close_handler = method(:handle_socket_close)
+      error_handler = ->(event) { handle_socket_error(socket, event, attempt) }
+      close_handler = ->(event) { handle_socket_close(event, attempt) }
 
-      socket.on(:open) { open_handler.call(socket) }
+      socket.on(:open) { open_handler.call }
       socket.on(:message) { |event| message_handler.call(socket, event) }
-      socket.on(:error) { |event| error_handler.call(socket, event) }
+      socket.on(:error) { |event| error_handler.call(event) }
       socket.on(:close) { |event| close_handler.call(event) }
     end
 
-    def handle_socket_open(socket)
+    def handle_socket_open(socket, attempt = nil)
       socket.send(JSON.generate(messageType: "data-sync", data: { timestamp: @data_store.version }))
+      attempt&.signal(:opened)
     rescue StandardError => e
       fail_status(e)
+      attempt&.signal(:failed)
+      safe_close_socket(socket)
     end
 
     def handle_socket_message(socket, event)
@@ -154,24 +231,18 @@ module FeatBit
       safe_close_socket(socket) unless @closed
     end
 
-    def handle_socket_error(socket, event)
+    def handle_socket_error(socket, event, attempt = nil)
       return if @closed
 
-      fail_status(event.respond_to?(:message) ? event.message : event, interrupted: true)
+      error = event.respond_to?(:message) ? event.message : event
+      fail_status(error, interrupted: true)
+      attempt&.signal(:failed)
       safe_close_socket(socket)
     end
 
-    def handle_socket_close(_event)
+    def handle_socket_close(_event, attempt = nil)
+      attempt&.signal(:closed)
       @status_provider.update(Status::INTERRUPTED, message: "WebSocket closed") unless @closed
-    end
-
-    def socket_closed?(socket)
-      return socket.closed? if socket.respond_to?(:closed?)
-      return !socket.open? if socket.respond_to?(:open?)
-
-      false
-    rescue StandardError
-      true
     end
 
     def safe_close_socket(socket)
@@ -193,9 +264,7 @@ module FeatBit
       end
     end
 
-    def monotonic_time
-      Process.clock_gettime(Process::CLOCK_MONOTONIC)
-    end
+    def monotonic_time = Process.clock_gettime(Process::CLOCK_MONOTONIC)
 
     def process_patch(data)
       items = Array(fetch(data, "featureFlags", [])).map { |flag| [:flags, flag] }

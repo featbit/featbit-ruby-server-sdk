@@ -250,6 +250,84 @@ RSpec.describe FeatBit::WebSocketDataSynchronizer do
     expect(Process.clock_gettime(Process::CLOCK_MONOTONIC) - started).to be < 1
   end
 
+  it "times out when the WebSocket handshake never opens" do
+    closed = Queue.new
+    socket = Class.new do
+      def initialize(closed)
+        @closed_event = closed
+        @handlers = {}
+        @closed = false
+      end
+
+      def on(event, &block) = @handlers[event] = block
+      def closed? = @closed
+
+      def close
+        return true if @closed
+
+        @closed = true
+        @closed_event << true
+        true
+      end
+    end.new(closed)
+    timeout_options = FeatBit::Options.new(env_secret: "secret", connect_timeout: 0.05, reconnect_delay: 10)
+    synchronizer = described_class.new(
+      options: timeout_options,
+      data_store: store,
+      status_provider: status,
+      connector: ->(*) { socket }
+    )
+
+    synchronizer.start
+
+    expect(Timeout.timeout(2) { closed.pop }).to be(true)
+    expect(status.status).to eq(FeatBit::Status::INTERRUPTED)
+    expect(status.message).to eq("WebSocket handshake timed out")
+    expect(synchronizer.close).to be(true)
+  end
+
+  it "backs off consecutive failures that happen before the WebSocket opens" do
+    delays = Queue.new
+    sockets = []
+    connector = lambda do |_url, _headers, &configure|
+      socket = Class.new do
+        attr_reader :handlers
+
+        def initialize
+          @handlers = {}
+          @closed = false
+        end
+
+        def on(event, &block) = @handlers[event] = block
+        def closed? = @closed
+        def close = @closed = true
+      end.new
+      sockets << socket
+      configure.call(socket)
+      Thread.new { socket.handlers.fetch(:error).call(StandardError.new("handshake failed")) }
+      socket
+    end
+    synchronizer = described_class.new(
+      options: options,
+      data_store: store,
+      status_provider: status,
+      connector: connector
+    )
+    delay_count = 0
+    allow(synchronizer).to receive(:interruptible_sleep) do |duration|
+      delay_count += 1
+      delays << duration
+      synchronizer.instance_variable_set(:@closed, true) if delay_count == 2
+    end
+
+    synchronizer.start
+
+    expect(Timeout.timeout(2) { delays.pop }).to eq(1.0)
+    expect(Timeout.timeout(2) { delays.pop }).to eq(2.0)
+    expect(Timeout.timeout(2) { sleep(0.01) while synchronizer.instance_variable_get(:@thread)&.alive? }).to be_nil
+    expect(sockets.length).to eq(2)
+  end
+
   it "closes a failed socket so the reconnect loop can recover" do
     fake_socket = Class.new do
       attr_reader :handlers
