@@ -13,7 +13,9 @@ RSpec.describe FeatBit::WebSocketDataSynchronizer do
     synchronizer = described_class.new(options: options, data_store: store, status_provider: status, on_flags_changed: lambda { |key|
       changes << key
     })
-    expect(synchronizer.process_message(test_bootstrap(test_flag))).to be(true)
+    result = synchronizer.process_message(test_bootstrap(test_flag))
+    expect(result).to be_valid
+    expect(result).to be_changed
     expect(store.flag("welcome")).not_to be_nil
     expect(status.status).to eq(FeatBit::Status::READY)
     expect(changes).to include("welcome")
@@ -21,7 +23,9 @@ RSpec.describe FeatBit::WebSocketDataSynchronizer do
 
   it "rejects malformed data without raising" do
     synchronizer = described_class.new(options: options, data_store: store, status_provider: status)
-    expect { synchronizer.process_message("not-json") }.not_to raise_error
+    result = synchronizer.process_message("not-json")
+    expect(result).not_to be_valid
+    expect(result).not_to be_changed
     expect(status.status).to eq(FeatBit::Status::FAILED)
   end
 
@@ -42,7 +46,9 @@ RSpec.describe FeatBit::WebSocketDataSynchronizer do
       "messageType" => "data-sync",
       "data" => { "eventType" => "patch", "featureFlags" => [patched], "segments" => [] }
     }
-    expect(synchronizer.process_message(message)).to be(true)
+    result = synchronizer.process_message(message)
+    expect(result).to be_valid
+    expect(result).to be_changed
     expect(store.flag("welcome")["name"]).to eq("updated")
     expect(changes).to eq(["welcome"])
   end
@@ -65,7 +71,9 @@ RSpec.describe FeatBit::WebSocketDataSynchronizer do
       "data" => { "eventType" => "patch", "featureFlags" => [stale_flag, fresh_flag], "segments" => [] }
     }
 
-    expect(synchronizer.process_message(message)).to be(true)
+    result = synchronizer.process_message(message)
+    expect(result).to be_valid
+    expect(result).to be_changed
     expect(store.flag("fresh")).not_to be_nil
     expect(changes).to eq(["fresh"])
   end
@@ -81,10 +89,30 @@ RSpec.describe FeatBit::WebSocketDataSynchronizer do
     socket = instance_double("Socket", close: true)
     synchronizer = described_class.new(options: options, data_store: store, status_provider: status)
 
+    result = synchronizer.process_message(message)
     synchronizer.send(:handle_socket_message, socket, JSON.generate(message))
 
+    expect(result).to be_valid
+    expect(result).not_to be_changed
     expect(socket).not_to have_received(:close)
     expect(store.version).to eq(10)
+    expect(status.status).to eq(FeatBit::Status::READY)
+  end
+
+  it "accepts an unchanged full synchronization and reports ready" do
+    message = test_bootstrap(test_flag)
+    expect(store.init(message)).to be(true)
+    status.update(FeatBit::Status::INTERRUPTED, message: "disconnected")
+    socket = instance_double("Socket", close: true)
+    synchronizer = described_class.new(options: options, data_store: store, status_provider: status)
+
+    result = synchronizer.process_message(message)
+    synchronizer.send(:handle_socket_message, socket, JSON.generate(message))
+
+    expect(result).to be_valid
+    expect(result).not_to be_changed
+    expect(socket).not_to have_received(:close)
+    expect(status.status).to eq(FeatBit::Status::READY)
   end
 
   it "rejects an entire malformed patch before applying valid siblings" do

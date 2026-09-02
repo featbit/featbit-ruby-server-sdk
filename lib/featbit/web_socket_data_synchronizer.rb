@@ -7,6 +7,27 @@ require "timeout"
 require "websocket-client-simple"
 
 module FeatBit
+  class SynchronizationResult
+    attr_reader :valid, :changed
+
+    def initialize(valid:, changed:)
+      @valid = valid
+      @changed = changed
+      freeze
+    end
+
+    def valid? = valid
+    def changed? = changed
+
+    INVALID = new(valid: false, changed: false)
+    UNCHANGED = new(valid: true, changed: false)
+    CHANGED = new(valid: true, changed: true)
+
+    def self.valid(changed:)
+      changed ? CHANGED : UNCHANGED
+    end
+  end
+
   class WebSocketClosePolicy
     SERVER_REJECTED_CODE = 4003
 
@@ -170,11 +191,11 @@ module FeatBit
 
     def process_message(message)
       envelope = message.is_a?(String) ? JSON.parse(message) : message
-      return false unless fetch(envelope, "messageType") == "data-sync"
+      return SynchronizationResult::INVALID unless fetch(envelope, "messageType") == "data-sync"
 
       data = fetch(envelope, "data", {})
       event_type = fetch(data, "eventType")
-      return false unless valid_data?(data, event_type)
+      return SynchronizationResult::INVALID unless valid_data?(data, event_type)
 
       old_keys = @data_store.all_flags.keys
       if event_type == "full"
@@ -185,16 +206,14 @@ module FeatBit
       end
 
       changed_keys.each { |key| safely_notify(key) }
-      return false unless changed
-
       @status_provider.update(Status::READY)
-      true
+      SynchronizationResult.valid(changed: changed)
     rescue JSON::ParserError => e
       @status_provider.update(Status::FAILED, message: "invalid data: #{e.message}")
-      false
+      SynchronizationResult::INVALID
     rescue StandardError => e
       fail_status(e)
-      false
+      SynchronizationResult::INVALID
     end
 
     private
@@ -284,7 +303,8 @@ module FeatBit
         return
       end
 
-      return if process_message(event.respond_to?(:data) ? event.data : event.to_s)
+      result = process_message(event.respond_to?(:data) ? event.data : event.to_s)
+      return if result.valid?
 
       safe_close_socket(socket) unless @closed
     end
@@ -330,16 +350,18 @@ module FeatBit
     def process_patch(data)
       items = Array(fetch(data, "featureFlags", [])).map { |flag| [:flags, flag] }
       items.concat(Array(fetch(data, "segments", [])).map { |segment| [:segments, segment] })
+      changed = false
       changed_keys = []
       items.sort_by { |_kind, item| item_version(item) }.each do |kind, item|
         applied = @data_store.upsert(kind, item, version: item_version(item))
+        changed = true if applied
         if applied && kind == :flags
           changed_keys << fetch(item, "key").to_s
         elsif applied
           changed_keys.concat(flags_referencing_segment(fetch(item, "id").to_s))
         end
       end
-      [true, changed_keys.uniq]
+      [changed, changed_keys.uniq]
     end
 
     def valid_data?(data, event_type)
@@ -378,9 +400,7 @@ module FeatBit
       @data_store.version + 1
     end
 
-    def websocket_url
-      "#{@options.streaming_uri}?token=#{build_token(@options.env_secret)}&type=server"
-    end
+    def websocket_url = "#{@options.streaming_uri}?token=#{build_token(@options.env_secret)}&type=server"
 
     def headers
       {
