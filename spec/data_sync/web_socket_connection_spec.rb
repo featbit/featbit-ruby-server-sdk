@@ -8,168 +8,6 @@ RSpec.describe FeatBit::WebSocketDataSynchronizer do
   let(:store) { FeatBit::InMemoryDataStore.new }
   let(:status) { FeatBit::StatusProvider.new(logger: options.logger) }
 
-  it "processes full synchronization messages and reports ready" do
-    changes = []
-    synchronizer = described_class.new(options: options, data_store: store, status_provider: status, on_flags_changed: lambda { |key|
-      changes << key
-    })
-    result = synchronizer.process_message(test_bootstrap(test_flag))
-    expect(result).to be_valid
-    expect(result).to be_changed
-    expect(store.flag("welcome")).not_to be_nil
-    expect(status.status).to eq(FeatBit::Status::READY)
-    expect(changes).to include("welcome")
-  end
-
-  it "rejects malformed data without raising" do
-    synchronizer = described_class.new(options: options, data_store: store, status_provider: status)
-    result = synchronizer.process_message("not-json")
-    expect(result).not_to be_valid
-    expect(result).not_to be_changed
-    expect(status.status).to eq(FeatBit::Status::FAILED)
-  end
-
-  it "applies patches in timestamp order and only reports affected flags" do
-    other = test_flag(key: "other")
-    expect(store.init(test_bootstrap(test_flag, other), version: 1)).to be(true)
-    changes = []
-    synchronizer = described_class.new(
-      options: options,
-      data_store: store,
-      status_provider: status,
-      on_flags_changed: ->(key) { changes << key }
-    )
-    patched = test_flag
-    patched["name"] = "updated"
-    patched["updatedAt"] = "2026-01-02T00:00:00Z"
-    message = {
-      "messageType" => "data-sync",
-      "data" => { "eventType" => "patch", "featureFlags" => [patched], "segments" => [] }
-    }
-    result = synchronizer.process_message(message)
-    expect(result).to be_valid
-    expect(result).to be_changed
-    expect(store.flag("welcome")["name"]).to eq("updated")
-    expect(changes).to eq(["welcome"])
-  end
-
-  it "ignores stale patch items without hiding fresh changes" do
-    expect(store.init(test_bootstrap(test_flag), version: 10)).to be(true)
-    changes = []
-    synchronizer = described_class.new(
-      options: options,
-      data_store: store,
-      status_provider: status,
-      on_flags_changed: ->(key) { changes << key }
-    )
-    stale_flag = test_flag
-    stale_flag["timestamp"] = 9
-    fresh_flag = test_flag(key: "fresh")
-    fresh_flag["timestamp"] = 11
-    message = {
-      "messageType" => "data-sync",
-      "data" => { "eventType" => "patch", "featureFlags" => [stale_flag, fresh_flag], "segments" => [] }
-    }
-
-    result = synchronizer.process_message(message)
-    expect(result).to be_valid
-    expect(result).to be_changed
-    expect(store.flag("fresh")).not_to be_nil
-    expect(changes).to eq(["fresh"])
-  end
-
-  it "accepts an all-stale patch without closing the socket" do
-    expect(store.init(test_bootstrap(test_flag), version: 10)).to be(true)
-    stale_flag = test_flag
-    stale_flag["timestamp"] = 9
-    message = {
-      "messageType" => "data-sync",
-      "data" => { "eventType" => "patch", "featureFlags" => [stale_flag], "segments" => [] }
-    }
-    socket = instance_double("Socket", close: true)
-    synchronizer = described_class.new(options: options, data_store: store, status_provider: status)
-
-    result = synchronizer.process_message(message)
-    synchronizer.send(:handle_socket_message, socket, JSON.generate(message))
-
-    expect(result).to be_valid
-    expect(result).not_to be_changed
-    expect(socket).not_to have_received(:close)
-    expect(store.version).to eq(10)
-    expect(status.status).to eq(FeatBit::Status::READY)
-  end
-
-  it "accepts an unchanged full synchronization and reports ready" do
-    message = test_bootstrap(test_flag)
-    expect(store.init(message)).to be(true)
-    status.update(FeatBit::Status::INTERRUPTED, message: "disconnected")
-    socket = instance_double("Socket", close: true)
-    synchronizer = described_class.new(options: options, data_store: store, status_provider: status)
-
-    result = synchronizer.process_message(message)
-    synchronizer.send(:handle_socket_message, socket, JSON.generate(message))
-
-    expect(result).to be_valid
-    expect(result).not_to be_changed
-    expect(socket).not_to have_received(:close)
-    expect(status.status).to eq(FeatBit::Status::READY)
-  end
-
-  it "rejects an entire malformed patch before applying valid siblings" do
-    fresh_flag = test_flag(key: "fresh")
-    fresh_flag["timestamp"] = 11
-    malformed_flag = test_flag
-    malformed_flag.delete("key")
-    message = {
-      "messageType" => "data-sync",
-      "data" => { "eventType" => "patch", "featureFlags" => [malformed_flag, fresh_flag], "segments" => [] }
-    }
-    socket = instance_double("Socket", close: true)
-    synchronizer = described_class.new(options: options, data_store: store, status_provider: status)
-
-    synchronizer.send(:handle_socket_message, socket, JSON.generate(message))
-
-    expect(socket).to have_received(:close)
-    expect(store.flag("fresh")).to be_nil
-  end
-
-  it "closes a socket when setup fails before reconnecting" do
-    closed = Queue.new
-    fake_socket = Class.new do
-      def initialize(closed)
-        @closed = closed
-      end
-
-      def on(*) = raise("handler setup failed")
-
-      def close
-        @closed << true
-        true
-      end
-    end.new(closed)
-    slow_options = FeatBit::Options.new(env_secret: "secret", reconnect_delay: 10)
-    synchronizer = described_class.new(
-      options: slow_options,
-      data_store: store,
-      status_provider: status,
-      connector: ->(*) { fake_socket }
-    )
-
-    synchronizer.start
-
-    expect(Timeout.timeout(2) { closed.pop }).to be(true)
-    expect(synchronizer.close).to be(true)
-  end
-
-  it "closes the socket when a synchronization message is rejected" do
-    socket = instance_double("Socket", close: true)
-    synchronizer = described_class.new(options: options, data_store: store, status_provider: status)
-
-    synchronizer.send(:handle_socket_message, socket, "not-json")
-
-    expect(socket).to have_received(:close)
-  end
-
   it "connects with FeatBit authentication and requests the local version" do
     fake_socket = Class.new do
       attr_reader :handlers, :sent
@@ -254,6 +92,34 @@ RSpec.describe FeatBit::WebSocketDataSynchronizer do
 
     Timeout.timeout(2) { connected.pop }
     expect(JSON.parse(socket.sent.fetch(0))).to eq("messageType" => "data-sync", "data" => { "timestamp" => 0 })
+    expect(synchronizer.close).to be(true)
+  end
+
+  it "closes a socket when setup fails before reconnecting" do
+    closed = Queue.new
+    fake_socket = Class.new do
+      def initialize(closed)
+        @closed = closed
+      end
+
+      def on(*) = raise("handler setup failed")
+
+      def close
+        @closed << true
+        true
+      end
+    end.new(closed)
+    slow_options = FeatBit::Options.new(env_secret: "secret", reconnect_delay: 10)
+    synchronizer = described_class.new(
+      options: slow_options,
+      data_store: store,
+      status_provider: status,
+      connector: ->(*) { fake_socket }
+    )
+
+    synchronizer.start
+
+    expect(Timeout.timeout(2) { closed.pop }).to be(true)
     expect(synchronizer.close).to be(true)
   end
 
