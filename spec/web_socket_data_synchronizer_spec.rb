@@ -345,14 +345,14 @@ RSpec.describe FeatBit::WebSocketDataSynchronizer do
     allow(synchronizer).to receive(:interruptible_sleep) do |duration|
       delay_count += 1
       delays << duration
-      synchronizer.instance_variable_set(:@closed, true) if delay_count == 2
+      synchronizer.close if delay_count == 2
     end
 
     synchronizer.start
 
     expect(Timeout.timeout(2) { delays.pop }).to eq(1.0)
     expect(Timeout.timeout(2) { delays.pop }).to eq(2.0)
-    expect(Timeout.timeout(2) { sleep(0.01) while synchronizer.instance_variable_get(:@thread)&.alive? }).to be_nil
+    expect(synchronizer.close).to be(true)
     expect(sockets.length).to eq(2)
   end
 
@@ -385,6 +385,7 @@ RSpec.describe FeatBit::WebSocketDataSynchronizer do
 
     fake_socket.handlers.fetch(:error).call(StandardError.new("connection failed"))
 
+    Timeout.timeout(2) { sleep(0.01) until fake_socket.closed? }
     expect(fake_socket).to be_closed
     expect(synchronizer.close).to be(true)
   end
@@ -425,7 +426,8 @@ RSpec.describe FeatBit::WebSocketDataSynchronizer do
     Timeout.timeout(2) { sleep(0.01) until socket.handlers.key?(:message) }
     socket.handlers.fetch(:open).call
     socket.handlers.fetch(:message).call(close_frame)
-    Timeout.timeout(2) { sleep(0.01) while synchronizer.instance_variable_get(:@thread)&.alive? }
+    worker = synchronizer.instance_variable_get(:@lifecycle).instance_variable_get(:@thread)
+    expect(worker.join(2)).to eq(worker)
 
     expect(attempts).to eq(1)
     expect(socket).to be_closed

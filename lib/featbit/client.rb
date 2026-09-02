@@ -122,10 +122,12 @@ module FeatBit
     end
 
     def close
+      owns_close = false
       @lifecycle_mutex.synchronize do
-        return @close_result unless @close_result.nil?
-        return true if @closed
+        return true if @close_result == true
+        return false if @closing
 
+        @closing = owns_close = true
         @closed = true
       end
 
@@ -135,6 +137,8 @@ module FeatBit
     rescue StandardError => e
       safe_log(:warn, "FeatBit client close failed: #{e.message}")
       false
+    ensure
+      @lifecycle_mutex.synchronize { @closing = false } if owns_close
     end
 
     alias stop close

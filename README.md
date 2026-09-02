@@ -230,6 +230,7 @@ Call `track` after evaluating the related experiment flag. `numeric_value` defau
 - Event enqueue is non-blocking and bounded; overload increments `dropped_events`.
 - Status and flag callbacks execute outside internal locks.
 - `close` is thread-safe and idempotent, flushes accepted events, stops background workers, and prevents new events.
+- A successful `close` confirms WebSocket connection work and callbacks have finished. It waits up to five seconds for the synchronizer; blocked application callbacks or cleanup failures return `false`, which may be retried. A concurrent or callback-initiated `close` can also return `false` while shutdown is incomplete; call again from outside callbacks to wait for completion. The `closed` status means shutdown was requested, not necessarily that cleanup succeeded.
 - Public client methods contain ordinary internal failures and return fallbacks or `false`.
 
 ## Supported Ruby versions

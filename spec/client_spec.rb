@@ -165,11 +165,15 @@ RSpec.describe FeatBit::Client do
     expect(client.close).to be(true)
   end
 
-  it "allows component shutdown to re-enter close without locking" do
+  it "reports a reentrant close as incomplete without deadlocking" do
     client = nil
+    reentrant_results = []
     synchronizer = instance_double("Synchronizer", start: true, close: true)
     processor = Object.new
-    processor.define_singleton_method(:close) { client.close }
+    processor.define_singleton_method(:close) do
+      reentrant_results << client.close
+      true
+    end
     options = FeatBit::Options.new(
       env_secret: "secret",
       start_wait: 0.001,
@@ -179,9 +183,10 @@ RSpec.describe FeatBit::Client do
     client = described_class.new(options)
 
     expect(client.close).to be(true)
+    expect(reentrant_results).to eq([false])
   end
 
-  it "attempts to close every component once and never raises" do
+  it "retries failed shutdown without skipping components or raising" do
     synchronizer = instance_double("Synchronizer", start: true)
     processor = instance_double("EventProcessor")
     allow(synchronizer).to receive(:close).and_raise("synchronizer failed")
@@ -196,8 +201,51 @@ RSpec.describe FeatBit::Client do
 
     expect(client.close).to be(false)
     expect(client.close).to be(false)
-    expect(synchronizer).to have_received(:close).once
-    expect(processor).to have_received(:close).once
+    expect(synchronizer).to have_received(:close).twice
+    expect(processor).to have_received(:close).twice
     expect(client.status_provider.status).to eq(FeatBit::Status::CLOSED)
+  end
+
+  it "can complete a previously incomplete close and caches only success" do
+    synchronizer = instance_double("Synchronizer", start: true)
+    allow(synchronizer).to receive(:close).and_return(false, true)
+    client = described_class.new(FeatBit::Options.new(
+                                   env_secret: "secret", disable_events: true, start_wait: 0.001,
+                                   synchronizer_factory: ->(*) { synchronizer }
+                                 ))
+
+    expect(client.close).to be(false)
+    expect(client.close).to be(true)
+    expect(client.close).to be(true)
+    expect(synchronizer).to have_received(:close).twice
+  end
+
+  it "does not report concurrent or status-listener shutdown as completed" do
+    entered = Queue.new
+    release = Queue.new
+    synchronizer = instance_double("Synchronizer", start: true)
+    allow(synchronizer).to receive(:close) do
+      entered << true
+      release.pop
+      true
+    end
+    options = FeatBit::Options.new(
+      env_secret: "secret", disable_events: true, start_wait: 0.001, synchronizer_factory: ->(*) { synchronizer }
+    )
+    client = described_class.new(options)
+    nested = []
+    client.status_provider.add_listener { |state, _| nested << client.close if state == FeatBit::Status::CLOSED }
+    closer = Thread.new { client.close }
+    Timeout.timeout(2) { entered.pop }
+
+    expect(client.close).to be(false)
+    release << true
+    expect(closer.join(2).value).to be(true)
+    expect(nested).to eq([false])
+    expect(client.close).to be(true)
+    expect(synchronizer).to have_received(:close).once
+  ensure
+    release << true if release
+    closer&.join(2)
   end
 end
