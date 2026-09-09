@@ -278,6 +278,38 @@ RSpec.describe "WebSocket shutdown" do
     reader&.join
   end
 
+  it "completes cleanup when writing the close frame fails" do
+    client = FeatBit::ClosableWebSocketClient.new
+    transport = instance_double(TCPSocket, close: nil)
+    reader = Thread.new { sleep }
+    client.instance_variable_set(:@socket, transport)
+    client.instance_variable_set(:@thread, reader)
+    allow(client).to receive(:send).and_raise(Errno::EPIPE)
+
+    expect(client.close(drain: true)).to be(true)
+    expect(transport).to have_received(:close)
+    expect(reader).not_to be_alive
+  ensure
+    reader&.kill
+    reader&.join
+  end
+
+  it "reports transport cleanup failure even when the close frame also fails" do
+    client = FeatBit::ClosableWebSocketClient.new
+    transport = instance_double(TCPSocket)
+    allow(transport).to receive(:close).and_raise(IOError, "cleanup failed")
+    reader = Thread.new { sleep }
+    client.instance_variable_set(:@socket, transport)
+    client.instance_variable_set(:@thread, reader)
+    allow(client).to receive(:send).and_raise(Errno::EPIPE)
+
+    expect { client.close(drain: true) }.to raise_error(IOError, "cleanup failed")
+    expect(reader).not_to be_alive
+  ensure
+    reader&.kill
+    reader&.join
+  end
+
   it "defers library-initiated reader shutdown to the owner" do
     client = FeatBit::ClosableWebSocketClient.new
     transport = instance_double(TCPSocket, close: nil)

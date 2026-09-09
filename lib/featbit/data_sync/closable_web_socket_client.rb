@@ -19,8 +19,8 @@ module FeatBit
 
       begin
         Timeout.timeout(CLOSE_TIMEOUT) { super() }
-      rescue Timeout::Error
-        # A stalled close-frame write must not prevent closing the TCP socket.
+      rescue IOError, SystemCallError, OpenSSL::SSL::SSLError, Timeout::Error
+        # A failed close handshake is harmless if the ensure cleanup succeeds.
       ensure
         @closed = true
         begin

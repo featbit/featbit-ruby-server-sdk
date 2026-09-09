@@ -223,13 +223,12 @@ client.flush
 
 Call `track` after evaluating the related experiment flag. `numeric_value` defaults to `1.0`.
 
-### Thread safety and shutdown
+### Thread safety
 
 - Share one client across application threads; do not create a client per request.
 - Flag evaluation performs no network I/O.
 - Event enqueue is non-blocking and bounded; overload increments `dropped_events`.
 - Status and flag callbacks execute outside internal locks.
-- `close` is thread-safe and idempotent, flushes accepted events, stops background workers, and prevents new events.
 - Public client methods contain ordinary internal failures and return fallbacks or `false`.
 
 ## Supported Ruby versions
