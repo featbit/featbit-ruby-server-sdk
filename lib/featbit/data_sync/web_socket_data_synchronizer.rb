@@ -44,7 +44,7 @@ module FeatBit
       return SynchronizationResult::INVALID if @lifecycle.stopped?
 
       envelope = message.is_a?(String) ? JSON.parse(message) : message
-      return SynchronizationResult::INVALID unless fetch(envelope, "messageType") == "data-sync"
+      return SynchronizationResult::UNCHANGED if fetch(envelope, "messageType") != "data-sync"
 
       data = fetch(envelope, "data", {})
       event_type = fetch(data, "eventType")

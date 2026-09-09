@@ -8,6 +8,36 @@ RSpec.describe FeatBit::WebSocketDataSynchronizer do
   let(:store) { FeatBit::InMemoryDataStore.new }
   let(:status) { FeatBit::StatusProvider.new(logger: options.logger) }
 
+  [FeatBit::Status::STARTING, FeatBit::Status::READY, FeatBit::Status::INTERRUPTED].each do |initial_status|
+    it "ignores unknown message types while #{initial_status}" do
+      store.init(test_bootstrap(test_flag)) unless initial_status == FeatBit::Status::STARTING
+      status.update(initial_status, message: "existing status")
+      original_state = [store.initialized?, store.version, store.all_flags]
+      socket = instance_double("Socket", close: true)
+      attempt = instance_double(FeatBit::WebSocketConnectionAttempt, signal: nil)
+      changes = []
+      synchronizer = described_class.new(
+        options: options, data_store: store, status_provider: status,
+        on_flags_changed: ->(key) { changes << key }
+      )
+      message = JSON.generate(messageType: "future-message", data: { private: "payload" })
+
+      synchronizer.send(:handle_socket_message, socket, message, attempt)
+
+      expect(socket).not_to have_received(:close)
+      expect(attempt).not_to have_received(:signal)
+      expect([store.initialized?, store.version, store.all_flags]).to eq(original_state)
+      expect([status.status, status.message]).to eq([initial_status, "existing status"])
+      expect(changes).to be_empty
+
+      synchronizer.send(:handle_socket_message, socket, JSON.generate(test_bootstrap(test_flag)), attempt)
+
+      expect(status.status).to eq(FeatBit::Status::READY)
+      expect(store.flag("welcome")).not_to be_nil
+      expect(attempt).not_to have_received(:signal)
+    end
+  end
+
   it "processes full synchronization messages and reports ready" do
     changes = []
     synchronizer = described_class.new(options: options, data_store: store, status_provider: status, on_flags_changed: lambda { |key|
