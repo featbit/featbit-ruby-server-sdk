@@ -56,7 +56,7 @@ RSpec.describe FeatBit::WebSocketDataSynchronizer do
     result = synchronizer.process_message("not-json")
     expect(result).not_to be_valid
     expect(result).not_to be_changed
-    expect(status.status).to eq(FeatBit::Status::FAILED)
+    expect(status.status).to eq(FeatBit::Status::STARTING)
   end
 
   it "applies patches in timestamp order and only reports affected flags" do
@@ -159,16 +159,61 @@ RSpec.describe FeatBit::WebSocketDataSynchronizer do
 
     synchronizer.send(:handle_socket_message, socket, JSON.generate(message))
 
-    expect(socket).to have_received(:close)
+    expect(socket).not_to have_received(:close)
     expect(store.flag("fresh")).to be_nil
   end
 
-  it "closes the socket when a synchronization message is rejected" do
+  it "keeps the socket open when a synchronization message is rejected" do
     socket = instance_double("Socket", close: true)
     synchronizer = described_class.new(options: options, data_store: store, status_provider: status)
 
     synchronizer.send(:handle_socket_message, socket, "not-json")
 
-    expect(socket).to have_received(:close)
+    expect(socket).not_to have_received(:close)
+  end
+
+  [false, true].each do |with_attempt|
+    it "preserves state and processes later messages after invalid input, with attempt: #{with_attempt}" do
+      logger = instance_double(Logger, error: nil)
+      configured_options = FeatBit::Options.new(env_secret: "secret", logger: logger)
+      socket = instance_double("Socket", close: true)
+      attempt = with_attempt ? instance_double(FeatBit::WebSocketConnectionAttempt, signal: nil) : nil
+      changes = []
+      synchronizer = described_class.new(
+        options: configured_options, data_store: store, status_provider: status,
+        on_flags_changed: ->(key) { changes << key }
+      )
+      invalid_messages = [
+        "not-json-private-payload", "null", "[]", "{}",
+        JSON.generate(messageType: "data-sync", data: nil),
+        JSON.generate(messageType: "data-sync", data: { eventType: "unknown", featureFlags: [], segments: [] }),
+        JSON.generate(messageType: "data-sync", data: { eventType: "full", featureFlags: {}, segments: [] })
+      ]
+
+      [FeatBit::Status::STARTING, FeatBit::Status::READY, FeatBit::Status::INTERRUPTED].each do |state|
+        store.init(test_bootstrap(test_flag)) unless state == FeatBit::Status::STARTING
+        status.update(state, message: "existing status")
+        original = [store.initialized?, store.version, store.all_flags]
+        invalid_messages.each { |message| synchronizer.send(:handle_socket_message, socket, message, attempt) }
+
+        expect([store.initialized?, store.version, store.all_flags]).to eq(original)
+        expect([status.status, status.message]).to eq([state, "existing status"])
+        expect(changes).to be_empty
+      end
+      expect(logger).to have_received(:error).exactly(invalid_messages.length * 3).times
+      expect(logger).not_to have_received(:error).with(include("private-payload"))
+
+      patched = test_flag
+      patched["updatedAt"] = "2026-01-02T00:00:00Z"
+      patched["name"] = "recovered"
+      message = { messageType: "data-sync", data: { eventType: "patch", featureFlags: [patched], segments: [] } }
+      synchronizer.send(:handle_socket_message, socket, JSON.generate(message), attempt)
+
+      expect(store.flag("welcome")["name"]).to eq("recovered")
+      expect(status.status).to eq(FeatBit::Status::READY)
+      expect(changes).to eq(["welcome"])
+      expect(socket).not_to have_received(:close)
+      expect(attempt).not_to have_received(:signal) if attempt
+    end
   end
 end

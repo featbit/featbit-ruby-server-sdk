@@ -44,11 +44,14 @@ module FeatBit
       return SynchronizationResult::INVALID if @lifecycle.stopped?
 
       envelope = message.is_a?(String) ? JSON.parse(message) : message
-      return SynchronizationResult::UNCHANGED if fetch(envelope, "messageType") != "data-sync"
+      message_type = fetch(envelope, "messageType")
+      return ignore_message("missing message type") unless message_type.is_a?(String) && !message_type.empty?
+
+      return SynchronizationResult::UNCHANGED if message_type != "data-sync"
 
       data = fetch(envelope, "data", {})
       event_type = fetch(data, "eventType")
-      return SynchronizationResult::INVALID unless valid_data?(data, event_type)
+      return ignore_message("invalid data") unless valid_data?(data, event_type)
 
       old_keys = @data_store.all_flags.keys
       if event_type == "full"
@@ -61,15 +64,18 @@ module FeatBit
       changed_keys.each { |key| safely_notify(key) unless @lifecycle.stopped? }
       @status_provider.update(Status::READY) unless @lifecycle.stopped?
       SynchronizationResult.valid(changed: changed)
-    rescue JSON::ParserError => e
-      @status_provider.update(Status::FAILED, message: "invalid data: #{e.message}")
-      SynchronizationResult::INVALID
-    rescue StandardError => e
-      fail_status(e)
-      SynchronizationResult::INVALID
+    rescue JSON::ParserError
+      ignore_message("invalid JSON")
+    rescue StandardError
+      ignore_message("processing error")
     end
 
     private
+
+    def ignore_message(reason)
+      @options.logger&.error("FeatBit ignored invalid sync message: #{reason}")
+      SynchronizationResult::INVALID
+    end
 
     def run
       delay = @options.reconnect_delay
@@ -141,11 +147,7 @@ module FeatBit
         return
       end
 
-      result = process_message(event.respond_to?(:data) ? event.data : event.to_s)
-      return if result.valid?
-
-      attempt&.signal(:failed)
-      safe_close_socket(socket) unless attempt || @lifecycle.stopped?
+      process_message(event.respond_to?(:data) ? event.data : event.to_s)
     end
 
     def handle_socket_error(socket, event, attempt = nil)
