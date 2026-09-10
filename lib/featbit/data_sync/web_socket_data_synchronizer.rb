@@ -4,7 +4,11 @@ require "json"
 require "securerandom"
 require "time"
 require "timeout"
-require "websocket-client-simple"
+require_relative "synchronization_result"
+require_relative "web_socket_close_policy"
+require_relative "web_socket_connection_attempt"
+require_relative "web_socket_lifecycle"
+require_relative "closable_web_socket_client"
 
 module FeatBit
   class WebSocketDataSynchronizer
@@ -16,50 +20,38 @@ module FeatBit
       @options = options
       @data_store = data_store
       @status_provider = status_provider
+      @close_policy = WebSocketClosePolicy.new(status_provider)
       @on_flags_changed = on_flags_changed
       @connector = connector || method(:connect)
-      @closed = false
-      @socket_mutex = Mutex.new
-      @lifecycle_mutex = Mutex.new
-      @thread = nil
-      @close_result = nil
+      @lifecycle = WebSocketLifecycle.new
     end
 
     def start
-      @lifecycle_mutex.synchronize do
-        return false if @closed || @thread&.alive?
-
-        @thread = Thread.new { run }
-        @thread.name = "featbit-websocket-sync" if @thread.respond_to?(:name=)
-        true
-      end
+      @lifecycle.start { run }
     rescue StandardError => e
       fail_status(e)
       false
     end
 
     def close
-      @lifecycle_mutex.synchronize do
-        return @close_result unless @close_result.nil?
-
-        @closed = true
-        socket = @socket_mutex.synchronize { @socket }
-        socket_closed = safe_close_socket(socket)
-        @thread&.join(5) unless Thread.current.equal?(@thread)
-        @close_result = socket_closed && !@thread&.alive?
-      end
+      @lifecycle.close
     rescue StandardError => e
       @options.logger&.warn("FeatBit synchronizer close failed: #{e.message}")
       false
     end
 
     def process_message(message)
+      return SynchronizationResult::INVALID if @lifecycle.stopped?
+
       envelope = message.is_a?(String) ? JSON.parse(message) : message
-      return false unless fetch(envelope, "messageType") == "data-sync"
+      message_type = fetch(envelope, "messageType")
+      return ignore_message("missing message type") unless message_type.is_a?(String) && !message_type.empty?
+
+      return SynchronizationResult::UNCHANGED if message_type != "data-sync"
 
       data = fetch(envelope, "data", {})
       event_type = fetch(data, "eventType")
-      return false unless valid_data?(data, event_type)
+      return ignore_message("invalid data") unless valid_data?(data, event_type)
 
       old_keys = @data_store.all_flags.keys
       if event_type == "full"
@@ -69,115 +61,118 @@ module FeatBit
         changed, changed_keys = process_patch(data)
       end
 
-      changed_keys.each { |key| safely_notify(key) }
-      return false unless changed
-
-      @status_provider.update(Status::READY)
-      true
-    rescue JSON::ParserError => e
-      @status_provider.update(Status::FAILED, message: "invalid data: #{e.message}")
-      false
-    rescue StandardError => e
-      fail_status(e)
-      false
+      changed_keys.each { |key| safely_notify(key) unless @lifecycle.stopped? }
+      @status_provider.update(Status::READY) unless @lifecycle.stopped?
+      SynchronizationResult.valid(changed: changed)
+    rescue JSON::ParserError
+      ignore_message("invalid JSON")
+    rescue StandardError
+      ignore_message("processing error")
     end
 
     private
 
+    def ignore_message(reason)
+      @options.logger&.error("FeatBit ignored invalid sync message: #{reason}")
+      SynchronizationResult::INVALID
+    end
+
     def run
       delay = @options.reconnect_delay
-      until @closed
-        socket = nil
-        begin
-          configured = false
-          socket = @connector.call(websocket_url, headers) do |connected_socket|
-            configure_socket(connected_socket)
-            configured = true
-          end
-          @socket_mutex.synchronize { @socket = socket }
-          break if @closed
+      until @lifecycle.stopped? || @close_policy.rejected?
+        opened = run_attempt
+        break if @lifecycle.stopped? || @close_policy.rejected?
 
-          configure_socket(socket) unless configured
-          delay = @options.reconnect_delay
-          next_ping = monotonic_time + PING_INTERVAL
-          until @closed || socket_closed?(socket)
-            if monotonic_time >= next_ping
-              socket.send(JSON.generate(messageType: "ping", data: nil))
-              next_ping = monotonic_time + PING_INTERVAL
-            end
-            interruptible_sleep(0.05)
-          end
-          break if @closed
-
-          @status_provider.update(Status::INTERRUPTED, message: "WebSocket disconnected")
-          interruptible_sleep(delay)
-          delay = [delay * 2, 30.0].min
-        rescue StandardError => e
-          fail_status(e, interrupted: true)
-          safe_close_socket(socket)
-          interruptible_sleep(delay) unless @closed
-          delay = [delay * 2, 30.0].min
-        ensure
-          safe_close_socket(socket) if @closed
-          @socket_mutex.synchronize { @socket = nil }
-        end
+        delay = @options.reconnect_delay if opened
+        interruptible_sleep(delay)
+        delay = [delay * 2, 30.0].min
       end
     end
+
+    def run_attempt
+      attempt = WebSocketConnectionAttempt.new(
+        timeout: @options.connect_timeout, clock: method(:monotonic_time), lifecycle: @lifecycle, closer: method(:safe_close_socket)
+      )
+      @lifecycle.activate(attempt)
+      attempt.connect(@connector, websocket_url, headers) { |socket| configure_socket(socket, attempt) }
+      result = attempt.wait(stopped: @lifecycle.method(:stopped?))
+      raise Timeout::Error, "WebSocket handshake timed out" if result == :timeout
+      return false unless result == :opened
+
+      attempt.monitor(stopped: @lifecycle.method(:stopped?), ping: method(:send_ping), interval: PING_INTERVAL)
+      handle_socket_close(nil) unless @lifecycle.stopped? || @close_policy.rejected?
+      true
+    rescue StandardError => e
+      fail_status(e, interrupted: true) unless @close_policy.rejected?
+      false
+    ensure
+      @lifecycle.finish(attempt) if attempt
+    end
+
+    def send_ping(socket) = socket.send(JSON.generate(messageType: "ping", data: nil))
 
     def connect(url, request_headers, &configure)
-      Timeout.timeout(@options.connect_timeout) do
-        WebSocket::Client::Simple.connect(url, headers: request_headers, &configure)
+      socket = ClosableWebSocketClient.new
+      configure.call(socket)
+      socket.connect(url, headers: request_headers)
+      socket
+    end
+
+    def configure_socket(socket, attempt = nil)
+      lifecycle = @lifecycle
+      handlers = {
+        open: ->(_) { handle_socket_open(socket, attempt) },
+        message: ->(event) { handle_socket_message(socket, event, attempt) },
+        error: ->(event) { handle_socket_error(socket, event, attempt) },
+        close: ->(event) { handle_socket_close(event, attempt) }
+      }
+      handlers.each do |name, handler|
+        socket.on(name) { |event| lifecycle.dispatch(attempt) { handler.call(event) } }
       end
     end
 
-    def configure_socket(socket)
-      open_handler = method(:handle_socket_open)
-      message_handler = method(:handle_socket_message)
-      error_handler = method(:handle_socket_error)
-      close_handler = method(:handle_socket_close)
-
-      socket.on(:open) { open_handler.call(socket) }
-      socket.on(:message) { |event| message_handler.call(socket, event) }
-      socket.on(:error) { |event| error_handler.call(socket, event) }
-      socket.on(:close) { |event| close_handler.call(event) }
-    end
-
-    def handle_socket_open(socket)
+    def handle_socket_open(socket, attempt = nil)
       socket.send(JSON.generate(messageType: "data-sync", data: { timestamp: @data_store.version }))
+      attempt&.signal(:opened)
     rescue StandardError => e
       fail_status(e)
+      attempt&.signal(:failed)
+      safe_close_socket(socket) unless attempt
     end
 
-    def handle_socket_message(socket, event)
-      return if process_message(event.respond_to?(:data) ? event.data : event.to_s)
+    def handle_socket_message(socket, event, attempt = nil)
+      if @close_policy.close_frame?(event)
+        handle_socket_close(event, attempt)
+        safe_close_socket(socket) unless attempt
+        return
+      end
 
-      safe_close_socket(socket) unless @closed
+      process_message(event.respond_to?(:data) ? event.data : event.to_s)
     end
 
-    def handle_socket_error(socket, event)
-      return if @closed
+    def handle_socket_error(socket, event, attempt = nil)
+      return if @lifecycle.stopped? || @close_policy.rejected?
 
-      fail_status(event.respond_to?(:message) ? event.message : event, interrupted: true)
-      safe_close_socket(socket)
+      error = event.respond_to?(:message) ? event.message : event
+      fail_status(error, interrupted: true)
+      attempt&.signal(:failed)
+      safe_close_socket(socket) unless attempt
     end
 
-    def handle_socket_close(_event)
-      @status_provider.update(Status::INTERRUPTED, message: "WebSocket closed") unless @closed
-    end
+    def handle_socket_close(event, attempt = nil)
+      return if @lifecycle.stopped?
 
-    def socket_closed?(socket)
-      return socket.closed? if socket.respond_to?(:closed?)
-      return !socket.open? if socket.respond_to?(:open?)
+      rejected = @close_policy.reject?(event)
+      attempt&.signal(rejected ? :rejected : :closed)
+      return if rejected || @close_policy.rejected?
 
-      false
-    rescue StandardError
-      true
+      @status_provider.update(Status::INTERRUPTED, message: "WebSocket closed")
     end
 
     def safe_close_socket(socket)
       return true unless socket
 
-      socket.close != false
+      Timeout.timeout(2) { (socket.is_a?(ClosableWebSocketClient) ? socket.close(drain: true) : socket.close) != false }
     rescue StandardError => e
       @options.logger&.warn("FeatBit WebSocket close failed: #{e.message}")
       false
@@ -185,7 +180,7 @@ module FeatBit
 
     def interruptible_sleep(duration)
       deadline = monotonic_time + duration.to_f
-      until @closed
+      until @lifecycle.stopped?
         remaining = deadline - monotonic_time
         break unless remaining.positive?
 
@@ -193,23 +188,23 @@ module FeatBit
       end
     end
 
-    def monotonic_time
-      Process.clock_gettime(Process::CLOCK_MONOTONIC)
-    end
+    def monotonic_time = Process.clock_gettime(Process::CLOCK_MONOTONIC)
 
     def process_patch(data)
       items = Array(fetch(data, "featureFlags", [])).map { |flag| [:flags, flag] }
       items.concat(Array(fetch(data, "segments", [])).map { |segment| [:segments, segment] })
+      changed = false
       changed_keys = []
       items.sort_by { |_kind, item| item_version(item) }.each do |kind, item|
         applied = @data_store.upsert(kind, item, version: item_version(item))
+        changed = true if applied
         if applied && kind == :flags
           changed_keys << fetch(item, "key").to_s
         elsif applied
           changed_keys.concat(flags_referencing_segment(fetch(item, "id").to_s))
         end
       end
-      [true, changed_keys.uniq]
+      [changed, changed_keys.uniq]
     end
 
     def valid_data?(data, event_type)
@@ -248,9 +243,7 @@ module FeatBit
       @data_store.version + 1
     end
 
-    def websocket_url
-      "#{@options.streaming_uri}?token=#{build_token(@options.env_secret)}&type=server"
-    end
+    def websocket_url = "#{@options.streaming_uri}?token=#{build_token(@options.env_secret)}&type=server"
 
     def headers
       {
@@ -281,6 +274,8 @@ module FeatBit
     end
 
     def fail_status(error, interrupted: false)
+      return if @lifecycle.stopped?
+
       message = error.respond_to?(:message) ? error.message : error.to_s
       @options.logger&.warn("FeatBit WebSocket synchronization failed: #{message}")
       @status_provider.update(interrupted ? Status::INTERRUPTED : Status::FAILED, message: message)

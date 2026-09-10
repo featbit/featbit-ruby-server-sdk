@@ -123,8 +123,7 @@ module FeatBit
 
     def close
       @lifecycle_mutex.synchronize do
-        return @close_result unless @close_result.nil?
-        return true if @closed
+        return @close_result == true if @closed
 
         @closed = true
       end

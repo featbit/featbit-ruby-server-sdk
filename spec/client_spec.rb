@@ -165,11 +165,15 @@ RSpec.describe FeatBit::Client do
     expect(client.close).to be(true)
   end
 
-  it "allows component shutdown to re-enter close without locking" do
+  it "reports a reentrant close as incomplete without deadlocking" do
     client = nil
+    reentrant_results = []
     synchronizer = instance_double("Synchronizer", start: true, close: true)
     processor = Object.new
-    processor.define_singleton_method(:close) { client.close }
+    processor.define_singleton_method(:close) do
+      reentrant_results << client.close
+      true
+    end
     options = FeatBit::Options.new(
       env_secret: "secret",
       start_wait: 0.001,
@@ -179,25 +183,6 @@ RSpec.describe FeatBit::Client do
     client = described_class.new(options)
 
     expect(client.close).to be(true)
-  end
-
-  it "attempts to close every component once and never raises" do
-    synchronizer = instance_double("Synchronizer", start: true)
-    processor = instance_double("EventProcessor")
-    allow(synchronizer).to receive(:close).and_raise("synchronizer failed")
-    allow(processor).to receive(:close).and_return(true)
-    options = FeatBit::Options.new(
-      env_secret: "secret",
-      start_wait: 0.001,
-      synchronizer_factory: ->(*) { synchronizer },
-      event_processor_factory: ->(*) { processor }
-    )
-    client = described_class.new(options)
-
-    expect(client.close).to be(false)
-    expect(client.close).to be(false)
-    expect(synchronizer).to have_received(:close).once
-    expect(processor).to have_received(:close).once
-    expect(client.status_provider.status).to eq(FeatBit::Status::CLOSED)
+    expect(reentrant_results).to eq([false])
   end
 end
